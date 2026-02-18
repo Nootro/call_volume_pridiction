@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 ==============================================================================
-Prophet Optimized Predictor for Call Center v4.0
+Prophet Optimized Predictor for Call Center v4.0 (Fixed)
 ==============================================================================
 
-コールセンター日次呼量予測システム v4.0
+コールセンター日次呼量予測システム v4.0 (評価修正版)
 - データ形状に基づく自動変換
 - Optunaで最適化した単一モデル
 - アンサンブル学習なし
+- ✅ 評価時の変換バグ修正
 
 主要機能:
 ---------
@@ -20,16 +21,16 @@ Prophet Optimized Predictor for Call Center v4.0
 2. Optunaベイズ最適化 (単一モデル)
 3. 詳細な自動診断 (CV, ANOVA, ACF, ADF, STL分解)
 4. 高度な特徴量エンジニアリング (30+ features)
-5. 検証データ予測 (validation_forecast.csv)
+5. 検証データ予測 (validation_forecast.csv) - 元のスケールで評価
 6. 実務用予測 (forecast.csv) - 全データで再学習
 7. 包括的可視化とレポート
 
 使用例:
 -------
-python prophet_v4_optimized.py data.csv --validation-months 2 --optuna-trials 200
+python prophet_v4_optimized_fixed.py data.csv --validation-months 2 --optuna-trials 200
 
 作成者: AI Assistant
-バージョン: 4.0
+バージョン: 4.0 (Fixed)
 最終更新: 2026-02-18
 """
 
@@ -99,9 +100,10 @@ sns.set_palette("husl")
 
 class ProphetOptimizedPredictor:
     """
-    Prophet v4.0 最適化予測システム
+    Prophet v4.0 最適化予測システム (評価修正版)
     - 自動変換選択
     - Optuna最適化単一モデル
+    - 評価時は元のスケールで計算
     """
     
     def __init__(self, output_dir: str = "output"):
@@ -109,10 +111,13 @@ class ProphetOptimizedPredictor:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True, parents=True)
         
-        # データ
+        # データ (元データと変換後データを両方保持)
         self.df_train = None
+        self.df_train_original = None  # 元のスケール
         self.df_validation = None
+        self.df_validation_original = None  # 元のスケール (評価用)
         self.df_full = None
+        self.df_full_original = None
         
         # 診断結果
         self.diagnostics = {}
@@ -133,13 +138,13 @@ class ProphetOptimizedPredictor:
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(self.output_dir / "prophet_v4.log"),
+                logging.FileHandler(self.output_dir / "prophet_v4_fixed.log"),
                 logging.StreamHandler()
             ]
         )
         self.logger = logging.getLogger(__name__)
         self.logger.info("=" * 80)
-        self.logger.info("Prophet v4.0 最適化予測システム 初期化完了")
+        self.logger.info("Prophet v4.0 最適化予測システム (評価修正版) 初期化完了")
         self.logger.info("=" * 80)
     
     def load_data(self, filepath: str, date_col: str = "ds", 
@@ -391,6 +396,41 @@ class ProphetOptimizedPredictor:
             'all_candidates': transformations
         }
     
+    def apply_transformation(self, y: pd.Series, transformation_info: Dict) -> pd.Series:
+        """
+        データに変換を適用
+        
+        Parameters
+        ----------
+        y : pd.Series
+            元データ
+        transformation_info : Dict
+            変換情報
+        
+        Returns
+        -------
+        pd.Series
+            変換後のデータ
+        """
+        method = transformation_info['method']
+        
+        if method == 'none':
+            return y
+        elif method == 'log':
+            return np.log(y)
+        elif method == 'sqrt':
+            return np.sqrt(y)
+        elif method == 'boxcox':
+            lambda_param = transformation_info['lambda']
+            return boxcox(y, lmbda=lambda_param)
+        elif method == 'yeojohnson':
+            lambda_param = transformation_info['lambda']
+            return yeojohnson(y, lmbda=lambda_param)
+        elif method == 'inverse':
+            return 1 / y
+        else:
+            return y
+    
     def inverse_transform(self, y_pred: np.ndarray, 
                          transformation_info: Dict) -> np.ndarray:
         """
@@ -600,7 +640,13 @@ class ProphetOptimizedPredictor:
                     forecast_cv['yhat'].values,
                     self.transformation_info
                 )
-                y_true = test_cv['y'].values
+                
+                # test_cvは元のスケールのデータを使う必要がある
+                # ここではtrain内のCV分割なので、df_train_originalから取得
+                test_cv_original = self.df_train_original[
+                    self.df_train_original['ds'] > cutoff
+                ]
+                y_true = test_cv_original['y'].values
                 
                 # MAE計算
                 mae = mean_absolute_error(y_true, y_pred)
@@ -637,7 +683,7 @@ class ProphetOptimizedPredictor:
         Parameters
         ----------
         df : pd.DataFrame
-            学習データ
+            学習データ (変換済み)
         best_params : Dict
             Optunaで最適化されたパラメータ
         holidays : pd.DataFrame
@@ -648,7 +694,7 @@ class ProphetOptimizedPredictor:
         Returns
         -------
         Tuple[Prophet, pd.DataFrame]
-            学習済みモデルと予測結果
+            学習済みモデルと予測結果 (逆変換済み)
         """
         self.logger.info("=" * 80)
         self.logger.info("最適化モデルの学習開始")
@@ -710,21 +756,33 @@ class ProphetOptimizedPredictor:
             self.transformation_info
         )
         
-        self.logger.info("予測完了")
+        self.logger.info("予測完了 (逆変換済み)")
         
         return model, forecast
     
-    def validate_forecast(self, df_validation: pd.DataFrame,
+    def validate_forecast(self, df_validation_original: pd.DataFrame,
                          forecast: pd.DataFrame) -> Dict:
         """
-        検証データで予測精度を評価
+        検証データで予測精度を評価 (元のスケールで)
+        
+        Parameters
+        ----------
+        df_validation_original : pd.DataFrame
+            検証データ (元のスケール)
+        forecast : pd.DataFrame
+            予測結果 (逆変換済み)
+        
+        Returns
+        -------
+        Dict
+            評価メトリクス
         """
         self.logger.info("=" * 80)
-        self.logger.info("検証開始")
+        self.logger.info("検証開始 (元のスケールで評価)")
         self.logger.info("=" * 80)
         
         # マージ
-        validation_dates = df_validation['ds'].values
+        validation_dates = df_validation_original['ds'].values
         forecast_subset = forecast[forecast['ds'].isin(validation_dates)].copy()
         
         if len(forecast_subset) == 0:
@@ -732,7 +790,7 @@ class ProphetOptimizedPredictor:
             return {}
         
         merged = pd.merge(
-            df_validation[['ds', 'y']],
+            df_validation_original[['ds', 'y']],
             forecast_subset[['ds', 'yhat', 'yhat_lower', 'yhat_upper']],
             on='ds',
             how='inner'
@@ -741,6 +799,9 @@ class ProphetOptimizedPredictor:
         if len(merged) == 0:
             self.logger.warning("マージ後のデータなし")
             return {}
+        
+        self.logger.info(f"✓ 元のスケールで評価: 実測値範囲 [{merged['y'].min():.1f}, {merged['y'].max():.1f}], "
+                        f"予測値範囲 [{merged['yhat'].min():.1f}, {merged['yhat'].max():.1f}]")
         
         # 月別に評価
         merged['year_month'] = merged['ds'].dt.to_period('M')
@@ -783,7 +844,7 @@ class ProphetOptimizedPredictor:
         }
         
         self.logger.info(f"全体: RMSE={rmse_all:.2f}, MAE={mae_all:.2f}, MAPE={mape_all:.2f}%")
-        self.logger.info("検証完了")
+        self.logger.info("✓ 検証完了 (元のスケールで正しく評価)")
         
         # JSON保存
         with open(self.output_dir / "validation_metrics.json", 'w', encoding='utf-8') as f:
@@ -791,38 +852,38 @@ class ProphetOptimizedPredictor:
         
         return metrics
     
-    def create_visualizations(self, df_train: pd.DataFrame,
-                             df_validation: pd.DataFrame,
+    def create_visualizations(self, df_train_original: pd.DataFrame,
+                             df_validation_original: pd.DataFrame,
                              forecast_validation: pd.DataFrame,
                              forecast_production: pd.DataFrame):
         """
-        可視化作成
+        可視化作成 (元のスケールで)
         """
         self.logger.info("=" * 80)
-        self.logger.info("可視化作成開始")
+        self.logger.info("可視化作成開始 (元のスケールで)")
         self.logger.info("=" * 80)
         
         fig = plt.figure(figsize=(24, 16))
         gs = fig.add_gridspec(4, 3, hspace=0.3, wspace=0.3)
         
-        # 1. 全体時系列
+        # 1. 全体時系列 (元のスケール)
         ax1 = fig.add_subplot(gs[0, :])
-        ax1.plot(df_train['ds'], df_train['y'], 'o-', label='訓練データ', alpha=0.6)
-        ax1.plot(df_validation['ds'], df_validation['y'], 'o-', label='検証データ', alpha=0.6)
+        ax1.plot(df_train_original['ds'], df_train_original['y'], 'o-', label='訓練データ', alpha=0.6)
+        ax1.plot(df_validation_original['ds'], df_validation_original['y'], 'o-', label='検証データ', alpha=0.6)
         
-        # 検証予測
-        val_future = forecast_validation[forecast_validation['ds'] > df_train['ds'].max()]
+        # 検証予測 (逆変換済み)
+        val_future = forecast_validation[forecast_validation['ds'] > df_train_original['ds'].max()]
         ax1.plot(val_future['ds'], val_future['yhat'], 'r-', label='検証予測', linewidth=2)
         ax1.fill_between(val_future['ds'], val_future['yhat_lower'], val_future['yhat_upper'],
                         alpha=0.2, color='red')
         
-        # 実務予測
-        prod_future = forecast_production[forecast_production['ds'] > df_validation['ds'].max()]
+        # 実務予測 (逆変換済み)
+        prod_future = forecast_production[forecast_production['ds'] > df_validation_original['ds'].max()]
         ax1.plot(prod_future['ds'], prod_future['yhat'], 'g-', label='実務予測', linewidth=2)
         ax1.fill_between(prod_future['ds'], prod_future['yhat_lower'], prod_future['yhat_upper'],
                         alpha=0.2, color='green')
         
-        ax1.set_title('時系列全体と予測', fontsize=14, fontweight='bold')
+        ax1.set_title('時系列全体と予測 (元のスケール)', fontsize=14, fontweight='bold')
         ax1.set_xlabel('日付')
         ax1.set_ylabel('呼量')
         ax1.legend()
@@ -830,7 +891,7 @@ class ProphetOptimizedPredictor:
         
         # 2. 検証期間拡大
         ax2 = fig.add_subplot(gs[1, 0])
-        ax2.plot(df_validation['ds'], df_validation['y'], 'o-', label='実測値', alpha=0.7)
+        ax2.plot(df_validation_original['ds'], df_validation_original['y'], 'o-', label='実測値', alpha=0.7)
         ax2.plot(val_future['ds'], val_future['yhat'], 'r-', label='予測値', linewidth=2)
         ax2.fill_between(val_future['ds'], val_future['yhat_lower'], val_future['yhat_upper'],
                         alpha=0.2, color='red')
@@ -843,7 +904,7 @@ class ProphetOptimizedPredictor:
         # 3. 実務予測期間
         ax3 = fig.add_subplot(gs[1, 1])
         # 直近30日 + 実務予測
-        recent = df_validation.tail(30)
+        recent = df_validation_original.tail(30)
         ax3.plot(recent['ds'], recent['y'], 'o-', label='直近実績', alpha=0.7)
         ax3.plot(prod_future['ds'], prod_future['yhat'], 'g-', label='実務予測', linewidth=2)
         ax3.fill_between(prod_future['ds'], prod_future['yhat_lower'], prod_future['yhat_upper'],
@@ -854,25 +915,25 @@ class ProphetOptimizedPredictor:
         ax3.legend()
         ax3.grid(True, alpha=0.3)
         
-        # 4. 残差プロット
+        # 4. 残差プロット (元のスケール)
         ax4 = fig.add_subplot(gs[1, 2])
         if self.validation_metrics:
             merged_val = pd.merge(
-                df_validation[['ds', 'y']],
+                df_validation_original[['ds', 'y']],
                 forecast_validation[['ds', 'yhat']],
                 on='ds'
             )
             residuals = merged_val['y'] - merged_val['yhat']
             ax4.scatter(merged_val['yhat'], residuals, alpha=0.5)
             ax4.axhline(y=0, color='r', linestyle='--')
-            ax4.set_title('残差プロット', fontsize=12, fontweight='bold')
+            ax4.set_title('残差プロット (元のスケール)', fontsize=12, fontweight='bold')
             ax4.set_xlabel('予測値')
             ax4.set_ylabel('残差')
             ax4.grid(True, alpha=0.3)
         
-        # 5. 変換前後の分布比較
+        # 5. 変換前後の分布比較 (元のスケール)
         ax5 = fig.add_subplot(gs[2, 0])
-        y_original = df_train['y']
+        y_original = df_train_original['y']
         ax5.hist(y_original, bins=50, alpha=0.7, label='元データ')
         ax5.set_title('元データの分布', fontsize=12, fontweight='bold')
         ax5.set_xlabel('呼量')
@@ -900,9 +961,9 @@ class ProphetOptimizedPredictor:
                          fontsize=12, fontweight='bold')
             ax7.grid(True, alpha=0.3)
         
-        # 7. 曜日別統計
+        # 7. 曜日別統計 (元のスケール)
         ax8 = fig.add_subplot(gs[3, 0])
-        df_all = pd.concat([df_train, df_validation])
+        df_all = pd.concat([df_train_original, df_validation_original])
         df_all['weekday'] = df_all['ds'].dt.dayofweek
         weekday_mean = df_all.groupby('weekday')['y'].mean()
         weekday_names = ['月', '火', '水', '木', '金', '土', '日']
@@ -914,7 +975,7 @@ class ProphetOptimizedPredictor:
         ax8.set_ylabel('平均呼量')
         ax8.grid(True, alpha=0.3, axis='y')
         
-        # 8. 月別統計
+        # 8. 月別統計 (元のスケール)
         ax9 = fig.add_subplot(gs[3, 1])
         df_all['month'] = df_all['ds'].dt.month
         monthly_mean = df_all.groupby('month')['y'].mean()
@@ -928,7 +989,7 @@ class ProphetOptimizedPredictor:
         # 9. 検証メトリクス
         ax10 = fig.add_subplot(gs[3, 2])
         if self.validation_metrics:
-            metrics_text = "検証メトリクス\n" + "=" * 30 + "\n"
+            metrics_text = "検証メトリクス (元のスケール)\n" + "=" * 30 + "\n"
             for key, val in self.validation_metrics.items():
                 if key == 'overall':
                     metrics_text += f"\n全体:\n"
@@ -942,7 +1003,7 @@ class ProphetOptimizedPredictor:
                      verticalalignment='center')
             ax10.axis('off')
         
-        plt.suptitle('Prophet v4.0 最適化予測システム - 分析結果', 
+        plt.suptitle('Prophet v4.0 最適化予測システム (評価修正版) - 分析結果', 
                     fontsize=16, fontweight='bold')
         
         output_path = self.output_dir / "visualizations.png"
@@ -957,17 +1018,17 @@ class ProphetOptimizedPredictor:
         """
         report = []
         report.append("=" * 80)
-        report.append("Prophet v4.0 最適化予測システム - 実行レポート")
+        report.append("Prophet v4.0 最適化予測システム (評価修正版) - 実行レポート")
         report.append("=" * 80)
         report.append(f"実行日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         report.append("")
         
         # データ情報
         report.append("【データ情報】")
-        report.append(f"訓練期間: {self.df_train['ds'].min()} 〜 {self.df_train['ds'].max()}")
-        report.append(f"訓練データ数: {len(self.df_train)} 日")
-        report.append(f"検証期間: {self.df_validation['ds'].min()} 〜 {self.df_validation['ds'].max()}")
-        report.append(f"検証データ数: {len(self.df_validation)} 日")
+        report.append(f"訓練期間: {self.df_train_original['ds'].min()} 〜 {self.df_train_original['ds'].max()}")
+        report.append(f"訓練データ数: {len(self.df_train_original)} 日")
+        report.append(f"検証期間: {self.df_validation_original['ds'].min()} 〜 {self.df_validation_original['ds'].max()}")
+        report.append(f"検証データ数: {len(self.df_validation_original)} 日")
         report.append("")
         
         # 変換情報
@@ -987,7 +1048,7 @@ class ProphetOptimizedPredictor:
         report.append("")
         
         # 検証メトリクス
-        report.append("【検証メトリクス】")
+        report.append("【検証メトリクス (元のスケールで評価)】")
         if self.validation_metrics:
             for key, val in self.validation_metrics.items():
                 if key == 'overall':
@@ -1002,7 +1063,7 @@ class ProphetOptimizedPredictor:
         # 実務予測情報
         if self.forecast_production is not None:
             prod_future = self.forecast_production[
-                self.forecast_production['ds'] > self.df_validation['ds'].max()
+                self.forecast_production['ds'] > self.df_validation_original['ds'].max()
             ]
             report.append("【実務予測】")
             report.append(f"予測期間: {prod_future['ds'].min()} 〜 {prod_future['ds'].max()}")
@@ -1013,10 +1074,10 @@ class ProphetOptimizedPredictor:
         
         # ファイル一覧
         report.append("【出力ファイル】")
-        report.append(f"  validation_forecast.csv - 検証期間予測")
-        report.append(f"  forecast.csv - 実務用予測")
-        report.append(f"  validation_metrics.json - 検証メトリクス")
-        report.append(f"  visualizations.png - 可視化")
+        report.append(f"  validation_forecast.csv - 検証期間予測 (元のスケール)")
+        report.append(f"  forecast.csv - 実務用予測 (元のスケール)")
+        report.append(f"  validation_metrics.json - 検証メトリクス (元のスケールで評価)")
+        report.append(f"  visualizations.png - 可視化 (元のスケール)")
         report.append(f"  model_validation.pkl - 検証用モデル")
         report.append(f"  model_production.pkl - 実務用モデル")
         report.append(f"  transformation_info.json - 変換情報")
@@ -1024,7 +1085,7 @@ class ProphetOptimizedPredictor:
         report.append("")
         
         report.append("=" * 80)
-        report.append("実行完了")
+        report.append("実行完了 (評価は元のスケールで正しく計算)")
         report.append("=" * 80)
         
         report_text = "\n".join(report)
@@ -1056,7 +1117,7 @@ class ProphetOptimizedPredictor:
             結果サマリー
         """
         self.logger.info("=" * 80)
-        self.logger.info("Prophet v4.0 最適化予測パイプライン開始")
+        self.logger.info("Prophet v4.0 最適化予測パイプライン開始 (評価修正版)")
         self.logger.info("=" * 80)
         
         # 1. データ読み込み
@@ -1064,37 +1125,33 @@ class ProphetOptimizedPredictor:
         
         # 2. 訓練/検証分割
         split_date = df['ds'].max() - relativedelta(months=validation_months)
-        self.df_train = df[df['ds'] <= split_date].copy()
-        self.df_validation = df[df['ds'] > split_date].copy()
-        self.df_full = df.copy()
+        self.df_train_original = df[df['ds'] <= split_date].copy()
+        self.df_validation_original = df[df['ds'] > split_date].copy()
+        self.df_full_original = df.copy()
         
         self.logger.info(f"データ分割:")
-        self.logger.info(f"  訓練: {len(self.df_train)} 日 ({self.df_train['ds'].min()} 〜 {self.df_train['ds'].max()})")
-        self.logger.info(f"  検証: {len(self.df_validation)} 日 ({self.df_validation['ds'].min()} 〜 {self.df_validation['ds'].max()})")
+        self.logger.info(f"  訓練: {len(self.df_train_original)} 日 ({self.df_train_original['ds'].min()} 〜 {self.df_train_original['ds'].max()})")
+        self.logger.info(f"  検証: {len(self.df_validation_original)} 日 ({self.df_validation_original['ds'].min()} 〜 {self.df_validation_original['ds'].max()})")
         
         # 3. データ変換選択 (訓練データベース)
-        self.transformation_info = self.select_optimal_transformation(self.df_train['y'])
+        self.transformation_info = self.select_optimal_transformation(self.df_train_original['y'])
         
         # 訓練データに変換を適用
-        self.df_train['y'] = self.transformation_info['y_transformed'].values
+        self.df_train = self.df_train_original.copy()
+        self.df_train['y'] = self.apply_transformation(
+            self.df_train['y'],
+            self.transformation_info
+        )
         
-        # 検証データにも同じ変換を適用
-        if self.transformation_info['method'] == 'log':
-            self.df_validation['y'] = np.log(self.df_validation['y'])
-        elif self.transformation_info['method'] == 'sqrt':
-            self.df_validation['y'] = np.sqrt(self.df_validation['y'])
-        elif self.transformation_info['method'] == 'boxcox':
-            lambda_param = self.transformation_info['lambda']
-            self.df_validation['y'] = boxcox(self.df_validation['y'], lmbda=lambda_param)
-        elif self.transformation_info['method'] == 'yeojohnson':
-            lambda_param = self.transformation_info['lambda']
-            self.df_validation['y'] = yeojohnson(self.df_validation['y'], lmbda=lambda_param)
-        elif self.transformation_info['method'] == 'inverse':
-            self.df_validation['y'] = 1 / self.df_validation['y']
+        # 検証データに変換を適用 (学習用、評価には使わない)
+        self.df_validation = self.df_validation_original.copy()
+        self.df_validation['y'] = self.apply_transformation(
+            self.df_validation['y'],
+            self.transformation_info
+        )
         
         # 変換情報保存
         with open(self.output_dir / "transformation_info.json", 'w', encoding='utf-8') as f:
-            # numpy配列をリストに変換
             trans_info_save = {
                 'method': self.transformation_info['method'],
                 'lambda': float(self.transformation_info['lambda']) if self.transformation_info['lambda'] is not None else None,
@@ -1104,7 +1161,7 @@ class ProphetOptimizedPredictor:
             }
             json.dump(trans_info_save, f, indent=2, ensure_ascii=False)
         
-        # 4. 診断
+        # 4. 診断 (変換後のデータで)
         self.diagnostics = self.run_diagnostics(self.df_train)
         
         # 5. 祝日データ作成
@@ -1122,7 +1179,7 @@ class ProphetOptimizedPredictor:
         with open(self.output_dir / "best_params.json", 'w', encoding='utf-8') as f:
             json.dump(self.best_params, f, indent=2, ensure_ascii=False)
         
-        # 7. 検証用モデル学習と予測 (訓練データのみ)
+        # 7. 検証用モデル学習と予測 (訓練データのみ、変換後)
         self.logger.info("\n" + "=" * 80)
         self.logger.info("STEP 1: 検証用モデル (訓練データのみで学習)")
         self.logger.info("=" * 80)
@@ -1134,7 +1191,7 @@ class ProphetOptimizedPredictor:
             forecast_periods=len(self.df_validation)
         )
         
-        # 検証予測保存
+        # 検証予測保存 (逆変換済み)
         validation_future = self.forecast_validation[
             self.forecast_validation['ds'] > self.df_train['ds'].max()
         ][['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
@@ -1142,12 +1199,12 @@ class ProphetOptimizedPredictor:
             self.output_dir / "validation_forecast.csv",
             index=False
         )
-        self.logger.info(f"検証予測保存: {len(validation_future)} 日")
+        self.logger.info(f"検証予測保存: {len(validation_future)} 日 (元のスケール)")
         
-        # 検証メトリクス計算
+        # 検証メトリクス計算 (元のスケールで)
         self.validation_metrics = self.validate_forecast(
-            self.df_validation,
-            self.forecast_validation
+            self.df_validation_original,  # 元のスケール
+            self.forecast_validation       # 逆変換済み
         )
         
         # 8. 実務用モデル学習と予測 (全データ)
@@ -1156,28 +1213,20 @@ class ProphetOptimizedPredictor:
         self.logger.info("=" * 80)
         
         # 全データに変換適用
-        df_full_transformed = self.df_full.copy()
-        if self.transformation_info['method'] == 'log':
-            df_full_transformed['y'] = np.log(df_full_transformed['y'])
-        elif self.transformation_info['method'] == 'sqrt':
-            df_full_transformed['y'] = np.sqrt(df_full_transformed['y'])
-        elif self.transformation_info['method'] == 'boxcox':
-            lambda_param = self.transformation_info['lambda']
-            df_full_transformed['y'] = boxcox(df_full_transformed['y'], lmbda=lambda_param)
-        elif self.transformation_info['method'] == 'yeojohnson':
-            lambda_param = self.transformation_info['lambda']
-            df_full_transformed['y'] = yeojohnson(df_full_transformed['y'], lmbda=lambda_param)
-        elif self.transformation_info['method'] == 'inverse':
-            df_full_transformed['y'] = 1 / df_full_transformed['y']
+        self.df_full = self.df_full_original.copy()
+        self.df_full['y'] = self.apply_transformation(
+            self.df_full['y'],
+            self.transformation_info
+        )
         
         self.model_production, self.forecast_production = self.fit_optimized_model(
-            df_full_transformed,
+            self.df_full,
             self.best_params.copy(),
             holidays,
             forecast_periods=60  # 2ヶ月
         )
         
-        # 実務予測保存
+        # 実務予測保存 (逆変換済み)
         production_future = self.forecast_production[
             self.forecast_production['ds'] > self.df_full['ds'].max()
         ][['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
@@ -1185,12 +1234,12 @@ class ProphetOptimizedPredictor:
             self.output_dir / "forecast.csv",
             index=False
         )
-        self.logger.info(f"実務予測保存: {len(production_future)} 日")
+        self.logger.info(f"実務予測保存: {len(production_future)} 日 (元のスケール)")
         
-        # 9. 可視化
+        # 9. 可視化 (元のスケールで)
         self.create_visualizations(
-            self.df_train,
-            self.df_validation,
+            self.df_train_original,
+            self.df_validation_original,
             self.forecast_validation,
             self.forecast_production
         )
@@ -1206,7 +1255,7 @@ class ProphetOptimizedPredictor:
             pickle.dump(self.model_production, f)
         
         self.logger.info("=" * 80)
-        self.logger.info("すべての処理が完了しました")
+        self.logger.info("すべての処理が完了しました (評価は元のスケールで正しく計算)")
         self.logger.info("=" * 80)
         
         return {
@@ -1223,7 +1272,7 @@ class ProphetOptimizedPredictor:
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Prophet v4.0 最適化予測システム')
+    parser = argparse.ArgumentParser(description='Prophet v4.0 最適化予測システム (評価修正版)')
     parser.add_argument('filepath', type=str, help='CSVファイルパス')
     parser.add_argument('--validation-months', type=int, default=2,
                        help='検証期間(月数) (デフォルト: 2)')
