@@ -212,27 +212,27 @@ class LightGBMUltimatePredictor:
         """
         logger.info(f"外れ値を検出中（contamination={contamination}）...")
         
-        # Isolation Forest
-        iso_forest = IsolationForest(contamination=contamination, random_state=42)
-        df['outlier_iso'] = iso_forest.fit_predict(df[['y']])
-        
-        # IQR法
-        Q1 = df['y'].quantile(0.25)
-        Q3 = df['y'].quantile(0.75)
-        IQR = Q3 - Q1
+        # Isolation Forestz
+        iso_forest = IsolationForest(contamin
         lower_bound = Q1 - 1.5 * IQR
         upper_bound = Q3 + 1.5 * IQR
         df['outlier_iqr'] = ((df['y'] < lower_bound) | (df['y'] > upper_bound)).astype(int)
         
         # 統合外れ値フラグ
         df['is_outlier'] = ((df['outlier_iso'] == -1) | (df['outlier_iqr'] == 1)).astype(int)
-        
+       
         outlier_count = df['is_outlier'].sum()
         logger.info(f"   {outlier_count} 個の外れ値を検出（{outlier_count/len(df)*100:.1f}%）")
         
         # 外れ値を削除せずキャッピング（時系列構造を保持）
         df.loc[df['y'] < lower_bound, 'y'] = lower_bound
-        df.loc[df['y'] > upper_bound, 'y'] = upper_bound
+        df.loc[df['y'] > upper_bound, 'y'] = upper_bounation=contamination, random_state=42)
+        df['outlier_iso'] = iso_forest.fit_predict(df[['y']])
+        
+        # IQR法
+        Q1 = df['y'].quantile(0.25)
+        Q3 = df['y'].quantile(0.75)
+        IQR = Q3 - Q1d
         
         logger.info("外れ値をIQR境界値にキャッピングしました。")
         return df

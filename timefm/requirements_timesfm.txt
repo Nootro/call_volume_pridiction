@@ -1,0 +1,35 @@
+"""
+requirements_timesfm.txt
+TimesFM 2.5 コールセンター呼量予測の依存ライブラリ
+
+インストール手順:
+    # 1. timesfm ライブラリ本体 (GitHubからインストール)
+    git clone https://github.com/google-research/timesfm.git
+    cd timesfm && pip install -e .[torch]
+    cd ..
+
+    # 2. その他の依存ライブラリ
+    pip install -r requirements_timesfm.txt
+"""
+
+# === モデルダウンロード ===
+huggingface_hub>=0.23.0
+
+# === データ処理 ===
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# === PyTorch (timesfm[torch] でインストール済みのため通常不要) ===
+# torch>=2.0.0  # timesfm が依存関係として含む
+
+# === 日本祝日 ===
+holidays>=0.46
+jpholiday>=0.1.9
+
+# === 可視化 ===
+matplotlib>=3.7.0
+
+# === SageMaker (AWS使用時) ===
+# sagemaker>=2.200.0
+# boto3>=1.34.0
