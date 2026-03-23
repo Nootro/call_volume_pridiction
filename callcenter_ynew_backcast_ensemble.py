@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import warnings
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -109,6 +110,27 @@ def _safe_import_dependencies():
 
 
 class NumericFeatureSelectorMixin:
+    @staticmethod
+    def _sanitize_feature_name(name: str) -> str:
+        name = str(name)
+        name = re.sub(r"[^A-Za-z0-9_]+", "_", name)
+        name = re.sub(r"_+", "_", name).strip("_")
+        return name or "feature"
+
+    def _build_safe_feature_name_map(self, columns: List[str]) -> Dict[str, str]:
+        used = set()
+        mapping: Dict[str, str] = {}
+        for col in columns:
+            base = self._sanitize_feature_name(col)
+            safe = base
+            suffix = 1
+            while safe in used:
+                safe = f"{base}_{suffix}"
+                suffix += 1
+            used.add(safe)
+            mapping[col] = safe
+        return mapping
+
     def _fit_feature_space(self, X: pd.DataFrame, y: pd.Series, top_k: int = 140):
         numeric_cols = [
             c for c in X.columns
@@ -138,10 +160,13 @@ class NumericFeatureSelectorMixin:
 
         self.feature_cols_ = selected
         self.medians_ = medians[selected]
+        self.safe_feature_name_map_ = self._build_safe_feature_name_map(self.feature_cols_)
 
     def _transform(self, X: pd.DataFrame) -> pd.DataFrame:
         Xn = X[self.feature_cols_].replace([np.inf, -np.inf], np.nan)
-        return Xn.fillna(self.medians_)
+        Xn = Xn.fillna(self.medians_)
+        Xn = Xn.rename(columns=self.safe_feature_name_map_)
+        return Xn
 
 
 class GlobalRatioModel:
